@@ -8,7 +8,7 @@ COPY . .
 
 # If your repo has multiple projects, set the csproj explicitly:
 # docker build --build-arg PROJECT_PATH=src/MDR_Importer/MDR_Importer.csproj .
-ARG PROJECT_PATH=MDR_Coder.csproj
+ARG PROJECT_PATH=MDR_Aggregator.csproj
 
 RUN dotnet restore "${PROJECT_PATH}"
 RUN dotnet publish "${PROJECT_PATH}" -c Release -o /app/out --no-restore
