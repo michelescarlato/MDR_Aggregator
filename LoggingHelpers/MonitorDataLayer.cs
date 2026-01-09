@@ -43,7 +43,7 @@ public class MonDataLayer : IMonDataLayer
 
         sql_string = $@"CREATE SERVER IF NOT EXISTS {source_db}
                         FOREIGN DATA WRAPPER postgres_fdw
-                        OPTIONS (host 'localhost', dbname '{source_db}');";
+                        OPTIONS (host '172.22.173.218', dbname '{source_db}');";
         conn.Execute(sql_string);
 
         sql_string = $@"CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER
