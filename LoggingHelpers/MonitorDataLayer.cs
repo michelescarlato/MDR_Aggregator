@@ -17,7 +17,21 @@ public class MonDataLayer : IMonDataLayer
         monConnString = credentials.GetConnectionString("mon");
         aggConnString = credentials.GetConnectionString("aggs");
     }
+    
+    private static string QI(string ident)
+    {
+        if (string.IsNullOrWhiteSpace(ident))
+            throw new ArgumentException("Identifier is null/empty", nameof(ident));
 
+        return "\"" + ident.Replace("\"", "\"\"") + "\"";
+    }
+
+    private static string SL(string value)
+    {
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        return "'" + value.Replace("'", "''") + "'";
+    }
+    
     public ICredentials Credentials => _credentials;
     
     public Source FetchSourceParameters(int source_id)
@@ -31,58 +45,95 @@ public class MonDataLayer : IMonDataLayer
         return _credentials.GetConnectionString(databaseName);
     }
     
-    public List<string> SetUpTempFTWs(ICredentials credentials, string dbConnString, string fdw_schema, 
+    public List<string> SetUpTempFTWs(ICredentials credentials, string dbConnString, string fdw_schema,
                                       string source_db, List<string> source_schemas)
     {
         using var conn = new NpgsqlConnection(dbConnString);
-        string username = credentials.Username;
-        string password = credentials.Password;
+        conn.Open();
 
-        string sql_string = $"CREATE EXTENSION IF NOT EXISTS postgres_fdw schema {fdw_schema};";
-        conn.Execute(sql_string);
+        if (string.IsNullOrWhiteSpace(credentials.Username) || string.IsNullOrWhiteSpace(credentials.Password))
+            throw new InvalidOperationException("Missing credentials (username/password).");
 
-        sql_string = $@"CREATE SERVER IF NOT EXISTS {source_db}
-                        FOREIGN DATA WRAPPER postgres_fdw
-                        OPTIONS (host '172.22.173.218', dbname '{source_db}');";
-        conn.Execute(sql_string);
+        // Derive host/port from the connection string (no hardcoded IP)
+        var csb = new NpgsqlConnectionStringBuilder(dbConnString);
+        var fdwHost = csb.Host;
+        var fdwPort = csb.Port;
 
-        sql_string = $@"CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER
-                        SERVER {source_db} 
-                        OPTIONS (user '{username}', password '{password}');";
-        conn.Execute(sql_string);
+        conn.Execute($@"CREATE SCHEMA IF NOT EXISTS {QI(fdw_schema)};");
+        conn.Execute($@"CREATE EXTENSION IF NOT EXISTS postgres_fdw WITH SCHEMA {QI(fdw_schema)};");
 
-        List<string> schema_names = new();
-        foreach(string schema in source_schemas)
+        var serverId = QI(source_db);
+
+        var hostLit = SL(fdwHost);
+        var portLit = SL(fdwPort.ToString());
+        var dbLit   = SL(source_db);
+
+        conn.Execute($@"
+            CREATE SERVER IF NOT EXISTS {serverId}
+            FOREIGN DATA WRAPPER postgres_fdw
+            OPTIONS (host {hostLit}, dbname {dbLit}, port {portLit});
+        ");
+
+        conn.Execute($@"
+            ALTER SERVER {serverId} OPTIONS (
+              SET host {hostLit},
+              SET dbname {dbLit},
+              SET port {portLit}
+            );
+        ");
+
+        var userLit = SL(credentials.Username);
+        var passLit = SL(credentials.Password);
+
+        conn.Execute($@"
+            CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER
+            SERVER {serverId}
+            OPTIONS (user {userLit}, password {passLit});
+        ");
+
+        conn.Execute($@"
+            ALTER USER MAPPING FOR CURRENT_USER
+            SERVER {serverId}
+            OPTIONS (SET user {userLit}, SET password {passLit});
+        ");
+
+        var schema_names = new List<string>();
+        foreach (var schema in source_schemas)
         {
-            string schema_name = $"{source_db}_{schema}";
-            sql_string = $@"DROP SCHEMA IF EXISTS {schema_name} cascade;
-                             CREATE SCHEMA {schema_name};
-                             IMPORT FOREIGN SCHEMA {schema}
-                             FROM SERVER {source_db} 
-                             INTO {schema_name};";
-            conn.Execute(sql_string);
+            var schema_name = $"{source_db}_{schema}";
+
+            conn.Execute($@"
+                DROP SCHEMA IF EXISTS {QI(schema_name)} CASCADE;
+                CREATE SCHEMA {QI(schema_name)};
+                IMPORT FOREIGN SCHEMA {QI(schema)}
+                FROM SERVER {serverId}
+                INTO {QI(schema_name)};
+            ");
+
             schema_names.Add(schema_name);
         }
+
         return schema_names;
     }
-    
-    
+
     public void DropTempFTWs(string dbConnString, string source_db, List<string> source_schemas)
     {
         using var conn = new NpgsqlConnection(dbConnString);
-        string sql_string = $"DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER {source_db};";
-        conn.Execute(sql_string);
+        conn.Open();
 
-        sql_string = $@"DROP SERVER IF EXISTS {source_db} CASCADE;";
-        conn.Execute(sql_string);
+        var serverId = QI(source_db);
 
-        foreach(string schema in source_schemas)
+        conn.Execute($@"DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER {serverId};");
+        conn.Execute($@"DROP SERVER IF EXISTS {serverId} CASCADE;");
+
+        foreach (var schema in source_schemas)
         {
-            string schema_name = $"{source_db}_{schema}";
-            sql_string = $@"DROP SCHEMA IF EXISTS {schema_name};";
-            conn.Execute(sql_string);
+            var schema_name = $"{source_db}_{schema}";
+            conn.Execute($@"DROP SCHEMA IF EXISTS {QI(schema_name)};");
         }
     }
+
+
     
     
     public IEnumerable<Source> RetrieveDataSources()
