@@ -18,19 +18,6 @@ public class MonDataLayer : IMonDataLayer
         aggConnString = credentials.GetConnectionString("aggs");
     }
     
-    private static string QI(string ident)
-    {
-        if (string.IsNullOrWhiteSpace(ident))
-            throw new ArgumentException("Identifier is null/empty", nameof(ident));
-
-        return "\"" + ident.Replace("\"", "\"\"") + "\"";
-    }
-
-    private static string SL(string value)
-    {
-        if (value is null) throw new ArgumentNullException(nameof(value));
-        return "'" + value.Replace("'", "''") + "'";
-    }
     
     public ICredentials Credentials => _credentials;
     
@@ -44,7 +31,20 @@ public class MonDataLayer : IMonDataLayer
     {
         return _credentials.GetConnectionString(databaseName);
     }
-    
+        
+    private static string QI(string ident)
+    {
+        if (string.IsNullOrWhiteSpace(ident))
+            throw new ArgumentException("Identifier is null/empty", nameof(ident));
+        return "\"" + ident.Replace("\"", "\"\"") + "\"";
+    }
+
+    private static string SL(string value)
+    {
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        return "'" + value.Replace("'", "''") + "'";
+    }
+
     public List<string> SetUpTempFTWs(ICredentials credentials, string dbConnString, string fdw_schema,
                                       string source_db, List<string> source_schemas)
     {
@@ -54,34 +54,49 @@ public class MonDataLayer : IMonDataLayer
         if (string.IsNullOrWhiteSpace(credentials.Username) || string.IsNullOrWhiteSpace(credentials.Password))
             throw new InvalidOperationException("Missing credentials (username/password).");
 
-        // Derive host/port from the connection string (no hardcoded IP)
+        // Derive host/port from destination connection string (removes hardcoded IP)
         var csb = new NpgsqlConnectionStringBuilder(dbConnString);
         var fdwHost = csb.Host;
         var fdwPort = csb.Port;
 
+        // Ensure schema exists + extension installed there (canonical syntax)
         conn.Execute($@"CREATE SCHEMA IF NOT EXISTS {QI(fdw_schema)};");
         conn.Execute($@"CREATE EXTENSION IF NOT EXISTS postgres_fdw WITH SCHEMA {QI(fdw_schema)};");
 
         var serverId = QI(source_db);
 
+        // FDW OPTIONS require string literals (not parameters)
         var hostLit = SL(fdwHost);
         var portLit = SL(fdwPort.ToString());
         var dbLit   = SL(source_db);
 
+        // Create server if missing (NOTE: now includes port)
         conn.Execute($@"
             CREATE SERVER IF NOT EXISTS {serverId}
             FOREIGN DATA WRAPPER postgres_fdw
             OPTIONS (host {hostLit}, dbname {dbLit}, port {portLit});
         ");
 
+        // Option B: ALWAYS enforce host/dbname; port needs SET vs ADD depending on existing options
         conn.Execute($@"
             ALTER SERVER {serverId} OPTIONS (
               SET host {hostLit},
-              SET dbname {dbLit},
-              SET port {portLit}
+              SET dbname {dbLit}
             );
         ");
 
+        var optStr = conn.ExecuteScalar<string>($@"
+            SELECT array_to_string(srvoptions, ',')
+            FROM pg_foreign_server
+            WHERE srvname = {SL(source_db)};
+        ");
+
+        if (optStr?.Contains("port=") == true)
+            conn.Execute($@"ALTER SERVER {serverId} OPTIONS (SET port {portLit});");
+        else
+            conn.Execute($@"ALTER SERVER {serverId} OPTIONS (ADD port {portLit});");
+
+        // Mapping: also literals; and ALWAYS enforce password
         var userLit = SL(credentials.Username);
         var passLit = SL(credentials.Password);
 
@@ -97,6 +112,7 @@ public class MonDataLayer : IMonDataLayer
             OPTIONS (SET user {userLit}, SET password {passLit});
         ");
 
+        // Import schemas
         var schema_names = new List<string>();
         foreach (var schema in source_schemas)
         {
